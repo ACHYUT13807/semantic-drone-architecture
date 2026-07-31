@@ -24,6 +24,10 @@ A* searches the free cells from the drone’s current grid coordinate to the cho
 
 ## Centreline-Guided Planner (v7)
 
+![Centreline extraction](../diagrams/centreline-extraction.png)
+
+*(a) binary road mask · (b) distance transform (for illustration) · (c) morphological skeleton used by the v7 planner — an ordered chain of N waypoints is sampled along the centreline.*
+
 Edge-hugging behaviour of the original goal selection was diagnosed as the dominant source of lateral oscillation. Version 7 replaces the single auto-goal with a pipeline that:
 
 1. Skeletonises the road mask (Zhang–Suen or `cv2.ximgproc.thinning`).

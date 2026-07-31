@@ -10,6 +10,14 @@ A pure vision-based road follower that relies solely on the current frame has no
 
 ## Proposed Theory
 
+![Occlusion recovery — climb](../diagrams/occlusion-recovery-climb.png)
+
+*(1) increase altitude to widen the nadir footprint until both flanking road segments are visible · (2) bridge the gap by geometric, edge, or vector continuity.*
+
+![Occlusion costmap semantics](../diagrams/occlusion-costmap-semantics.png)
+
+*The same occlusion under two costmap semantics — marking the gap UNKNOWN lets A* plan through it on the last valid heading.*
+
 The recovery theory treats the last known centreline as a short-term prior. While the mask remains empty the planner continues to advance along a decaying extrapolation of that centreline, simultaneously monitoring for the reappearance of road pixels. When a sufficient connected component of road reappears, the system re-initialises the skeleton chain and resumes normal centreline tracking. Safety bounds (maximum extrapolation distance, maximum time without a mask, altitude floor) prevent the aircraft from flying indefinitely into unknown space.
 
 The idea is deliberately simple: it does not require a full simultaneous-localisation-and-mapping solution or a pre-loaded map. It only requires that the centreline extractor already present in the v7 planner be given a short temporal memory and a set of conservative recovery limits.

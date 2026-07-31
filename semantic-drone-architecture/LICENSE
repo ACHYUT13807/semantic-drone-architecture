@@ -1,17 +1,26 @@
-MIT License
-
+Semantic Drone Architecture — Documentation
 Copyright (c) 2026 Achyut Tiwari
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This work is licensed under the Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International License (CC BY-NC-ND 4.0).
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+You are free to:
+  - Share — copy and redistribute this material in any medium or format, for any non-commercial purpose.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+Under the following terms:
+  - Attribution — You must give appropriate credit to Achyut Tiwari, provide a link to this
+    repository, and indicate if changes were made. You may do so in any reasonable manner,
+    but not in any way that suggests the licensor endorses you or your use.
+  - NonCommercial — You may not use the material for commercial purposes.
+  - NoDerivatives — If you remix, transform, or build upon the material, you may not
+    distribute the modified material.
+  - No additional restrictions — You may not apply legal terms or technological measures
+    that legally restrict others from doing anything the license permits.
+
+Notices:
+  - This license applies to the documentation, diagrams, and written content in this
+    repository. It does not apply to any third-party material referenced or linked herein.
+  - The underlying source code, trained model weights, and datasets for the Semantic Drone
+    project are NOT included in this repository and are not covered by this license.
+
+Full legal text: https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
+Human-readable summary: https://creativecommons.org/licenses/by-nc-nd/4.0/

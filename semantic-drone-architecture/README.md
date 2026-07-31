@@ -78,4 +78,8 @@ All figures referenced in the original progress report are original.
 
 ## License
 
-See LICENSE file.
+Documentation, diagrams and written content in this repository are licensed under  
+**Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)**.
+
+See the [LICENSE](LICENSE) file for the full text.  
+Source code, model weights and datasets are **not** included in this repository and are not covered by this license.

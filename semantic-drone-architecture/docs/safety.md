@@ -16,6 +16,10 @@ Only after that acknowledgement does the node proceed to arm and enter Offboard 
 
 ## Layered Safety Model
 
+![Layered safety model](../diagrams/layered-safety.png)
+
+*Each layer is independent of everything inside it — the kill switch does not consult the software.*
+
 Safety is enforced at four independent layers:
 
 1. **Hardware kill switch** — a physical RC channel that immediately cuts motor power.

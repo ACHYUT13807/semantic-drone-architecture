@@ -22,9 +22,17 @@ The Orin Nano was brought up with JetPack 6.x (L4T R36.3.0, Ubuntu 22.04.5). ROS
 
 ## Power Architecture
 
+![Power architecture](../diagrams/power-architecture.png)
+
+*One 6S 12000 mAh pack, three independent rails. The Jetson’s dedicated UBEC keeps spiky GPU current off the flight controller’s supply.*
+
 Everything on the aircraft ultimately draws from the single 6S pack. Three regulated rails supply the Pixhawk, the Jetson, and the camera. Careful attention was paid to ground loops and to ensuring that a brown-out on the companion computer cannot interrupt the flight controller’s power. The detailed schematic and connector pin-outs are recorded in the original progress report; the essential principle is that the flight-critical path remains powered even if the Jetson is deliberately powered down.
 
 ## Pixhawk ↔ Jetson Serial Link
+
+![Pixhawk–Jetson serial wiring](../diagrams/pixhawk-jetson-serial.png)
+
+*TELEM2 → UART1: TX crosses to RX, ground is shared, VCC is deliberately left open (both boards self-powered).*
 
 In the flight configuration the Pixhawk’s TELEM2 port is wired to the Jetson’s UART1. MAVSDK connects with the URL `serial:///dev/ttyACM0:57600` (or the corresponding UART device). Bench verification confirmed that MAVSDK 2.8.4 can arm, take off (in simulation), and stream telemetry. The same link is used for both distributed SITL (over UDP) and real flight (over serial).
 

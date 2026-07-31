@@ -37,6 +37,10 @@ The practical consequence is that the perception problem becomes a semantic-segm
 
 ## 4. The Two-Computer Split
 
+![The two-computer split](../diagrams/two-computer-split.png)
+
+*The flight controller never depends on the perception stack.*
+
 A single architectural fact shapes the entire system: the work is divided across two computers that talk to each other over a serial/USB MAVLink link.
 
 - The **companion computer** is an NVIDIA Jetson Orin Nano 8 GB. It runs the camera driver, the segmentation network (or HSV fallback), the occupancy-grid construction, the A* planner, the automatic goal selection, the waypoint management, and the high-level control logic that issues MAVSDK setpoints. All of the ROS 2 code and all of the machine-learning inference live here. The presence of a CUDA-capable GPU is the reason the vision workload resides on this board.
@@ -60,6 +64,8 @@ A clean way to hold the whole system in one’s head is to separate three logica
 Data flows perception → decision → actuation. A thin feedback wire (the vehicle’s pose, republished by the control node on `/mavsdk/pose`) runs from actuation back to decision so that the planner always knows where the aircraft currently is. This is a textbook sense–plan–act architecture, the dominant paradigm for this class of autonomous robot.
 
 ## 6. End-to-End Pipeline as a Conveyor Belt
+
+![End-to-end pipeline](../diagrams/end-to-end-pipeline.png)
 
 Think of the system as a continuously running conveyor belt. One trip along the belt looks like this:
 

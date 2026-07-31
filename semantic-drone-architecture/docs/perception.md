@@ -12,6 +12,10 @@ After the first outdoor flight a 180° camera-roll mounting error was diagnosed.
 
 ## HSV Colour Segmentation (Simulation Fallback)
 
+![HSV measured thresholds](../diagrams/hsv-thresholds.png)
+
+*Figure: HSV road-threshold volume against pixel values measured on a real nadir frame (H 136–140, S 21–24, V 109–135). The threshold box is deliberately wider than the measured road pixels — margin for lighting.*
+
 HSV was chosen for the first working loop because it is fast, deterministic, needs no GPU, and is trivial to debug. Thresholds were measured on a real nadir frame rather than guessed:
 
 ```
@@ -36,6 +40,10 @@ The result was a network that looked plausible on paper but emitted almost no ro
 The replacement keeps the classic U-Net encoder–decoder with skip connections but substitutes a MobileNetV2 backbone pretrained on ImageNet. MobileNetV2 was selected because its inverted residual blocks fit the 8 GB memory ceiling of the Jetson while still providing strong features.
 
 An 8-kernel Gabor bank (4 orientations × 2 frequencies) is fused into the decoder at 128×128 resolution. Texture is a powerful additional cue for asphalt and concrete under varying illumination.
+
+![Gabor kernel bank](../diagrams/gabor-kernels.png)
+
+*A bank of Gabor kernels: smooth asphalt responds weakly across all of them; grainy dirt responds strongly at high frequency.*
 
 The network emits a **12-class softmax head**. The road class is read at index 10; the remaining classes provide the multi-class supervision that improves feature quality even when only the binary road/not-road decision is used downstream.
 
