@@ -2,298 +2,53 @@
 
 ## Overview
 
-Perception is the foundation of the Semantic Drone navigation framework. Every downstream decision—including graph construction, path planning, and autonomous flight—depends on the quality and consistency of the semantic representation generated from the onboard camera.
+Perception converts a downward-facing colour image into a binary road mask that the planner can treat as free space. Two segmenters coexist: a classical HSV colour threshold used for simulation and early hardware bring-up, and a learned MobileNetV2 U-Net with Gabor texture fusion that is the production network. This document describes both, the failure modes that forced a complete rewrite of the network, the loss function that finally produced usable masks, and the path to TensorRT inference on the Jetson.
 
-Unlike conventional UAV navigation systems that rely on handcrafted computer vision or geometric feature extraction, Semantic Drone performs dense semantic scene understanding to infer traversable road structures directly from monocular RGB imagery.
+## Camera Pipeline
 
-The perception subsystem is designed not merely to classify pixels, but to produce a navigation-ready representation that remains robust under changing illumination, shadows, partial occlusions, and varying road textures.
+On hardware the Intel RealSense D455 publishes RGB (and depth) via its ROS 2 driver. On simulation the Gazebo mono camera is bridged into the identical `sensor_msgs/Image` topic by `gz_camera_bridge`. Downstream nodes therefore see the same message type regardless of source. Encoding must be consistent (`bgr8` versus `rgb8`); a silent channel swap makes HSV thresholds fail mysteriously.
 
----
+## HSV Colour Segmentation
 
-# Design Objectives
+HSV was chosen for the first working loop because it is fast, deterministic, needs no GPU, and is trivial to debug. Thresholds were measured on a real nadir frame rather than guessed:
 
-The perception system was developed around five primary objectives:
-
-* Robust semantic understanding of aerial imagery
-* Reliable road extraction under real-world conditions
-* Real-time inference on embedded hardware
-* Generation of planner-friendly traversability maps
-* High modularity for future model replacement
-
-Rather than maximizing segmentation accuracy alone, the architecture prioritizes **navigation quality**, recognizing that a visually perfect segmentation may still produce poor navigation behavior if road continuity or topology is not preserved.
-
----
-
-# Perception Architecture
-
-The perception pipeline transforms raw camera imagery into a refined traversability representation through multiple sequential processing stages.
-
-```text
-RGB Camera
-      │
-      ▼
-Frame Acquisition
-      │
-      ▼
-Image Preprocessing
-      │
-      ▼
-Semantic Segmentation Network
-      │
-      ▼
-Raw Road Probability Map
-      │
-      ▼
-Morphological Refinement
-      │
-      ▼
-Connected Component Analysis
-      │
-      ▼
-Occlusion Recovery
-      │
-      ▼
-Road Continuity Enhancement
-      │
-      ▼
-Navigation Costmap
+```
+LOWER = [100, 0, 50]
+UPPER = [170, 50, 180]
 ```
 
-Each stage progressively increases the structural quality of the environment representation before it reaches the planning subsystem.
+These bounds bracket the observed road statistics (H ≈ 136–140, S ≈ 21–24, V ≈ 109–135). A diagnostic that logs the percentage of the image labelled as road every 30 frames is the fastest health check for the entire front-end: a sudden drop to near zero indicates either a lighting change or an encoding flip.
 
----
+## The Original U-Net Failure
 
-# Image Acquisition
+The first learned network produced near-empty masks. Three independent faults were stacked:
 
-The system operates using a forward-facing monocular RGB camera mounted on the UAV.
+1. A numerical / normalisation error that collapsed activations.
+2. An architectural mismatch with the memory budget of the Orin Nano.
+3. A plain cross-entropy loss that was dominated by the overwhelming non-road class.
 
-Compared to stereo cameras or LiDAR systems, a monocular camera offers several practical advantages:
+The result was a network that looked plausible on paper but emitted almost no road pixels in practice. The diagnosis required systematic ablation rather than further hyper-parameter search.
 
-* lower payload weight
-* reduced power consumption
-* lower computational requirements
-* inexpensive hardware
-* simpler calibration
+## Replacement Architecture: MobileNetV2 U-Net + Gabor
 
-The camera continuously streams synchronized RGB frames into the ROS 2 perception pipeline, where each frame is timestamped and processed independently.
+The replacement keeps the classic U-Net encoder–decoder with skip connections but substitutes a MobileNetV2 backbone pretrained on ImageNet. MobileNetV2 was selected because its inverted residual blocks fit the 8 GB memory ceiling of the Jetson while still providing strong features.
 
----
+An 8-kernel Gabor bank (4 orientations × 2 frequencies) is fused into the decoder at 128×128 resolution. Texture is a powerful additional cue for asphalt and concrete under varying illumination; the fusion measurably improved boundary precision.
 
-# Image Preprocessing
+## Loss Function
 
-Raw camera images undergo a standardized preprocessing stage prior to neural network inference.
+The decisive change was the switch to a hybrid Dice + cross-entropy loss. Dice directly optimises the intersection-over-union of the road class and therefore counters the extreme class imbalance. Combined with a modest cross-entropy term it produced a validation road IoU of approximately 0.80 on the AeroScapes hold-out set — a qualitative jump from the previous near-empty masks.
 
-Typical preprocessing operations include:
+## Deployment on the Jetson
 
-* image resizing
-* normalization
-* channel standardization
-* tensor conversion
+Because TensorFlow 2.15 (required by the Jetson ecosystem) cannot load a Keras-3 `.keras` archive, the architecture is rebuilt in code on the device and the weights are loaded from an `.h5` file. This “architecture-plus-weights” pattern is the only reliable way to move the model between the training workstation and the aircraft.
 
-Maintaining a consistent input representation reduces distribution shifts between training and deployment while ensuring deterministic inference behavior across simulation and embedded hardware.
+TensorRT conversion remains on the critical path for production inference rates. Until that conversion is complete the network runs under TensorFlow; the measured latency is acceptable for the current 10–15 Hz camera rate but leaves little margin.
 
----
+## Domain Gap and Fine-Tuning
 
-# Semantic Segmentation Network
+The network was trained on AeroScapes. Real D455 frames differ in colour balance, resolution and lens distortion. After the 180° camera-rotation fix discovered on the first outdoor flight, a short domain fine-tuning pass on real imagery is required before the next autonomous centreline-tracking flight. That pass, followed by TensorRT conversion, closes the perception track of Prototype 1-α.
 
-At the core of the perception subsystem lies a lightweight encoder-decoder semantic segmentation architecture optimized for edge deployment.
+## Status
 
-The network combines the representational efficiency of a MobileNetV2 encoder with a U-Net-inspired decoder capable of recovering fine spatial detail through multi-scale feature fusion.
-
-Compared to heavier encoder backbones, MobileNetV2 provides an effective balance between:
-
-* computational efficiency
-* inference speed
-* parameter count
-* deployment feasibility on embedded platforms
-
-The decoder progressively reconstructs high-resolution semantic predictions using skip connections that preserve spatial information lost during feature extraction.
-
-This design enables dense pixel-wise classification while maintaining real-time performance constraints.
-
----
-
-# Texture-Aware Feature Enhancement
-
-Road surfaces frequently exhibit subtle texture variations that are difficult to distinguish using conventional convolutional features alone.
-
-To improve robustness under varying surface materials and illumination conditions, the perception architecture incorporates a texture-aware feature extraction strategy inspired by Gabor filtering.
-
-Texture-oriented features assist the network in identifying:
-
-* road boundaries
-* lane-like structures
-* asphalt textures
-* concrete surfaces
-* low-contrast road regions
-
-Rather than replacing learned convolutional features, these complementary descriptors enrich the semantic representation and improve discrimination between traversable and non-traversable regions.
-
----
-
-# Embedded Inference Optimization
-
-The perception subsystem is intended for deployment on resource-constrained embedded hardware.
-
-To satisfy real-time execution requirements, the trained segmentation network is deployed using an optimized inference pipeline based on ONNX Runtime, with support for hardware acceleration on NVIDIA Jetson platforms.
-
-Optimization focuses on reducing:
-
-* inference latency
-* memory footprint
-* CPU utilization
-* energy consumption
-
-This deployment strategy enables high-throughput semantic inference while preserving segmentation quality, making the system suitable for onboard autonomous flight.
-
----
-
-# Semantic Road Representation
-
-The segmentation network produces a dense semantic probability map representing the likelihood of each pixel belonging to a traversable road surface.
-
-Unlike binary thresholding approaches, semantic probabilities retain richer structural information that supports subsequent refinement and topology reconstruction.
-
-The road representation forms the primary interface between perception and planning.
-
----
-
-# Morphological Refinement
-
-Raw neural network predictions frequently contain small artifacts arising from sensor noise, image compression, or uncertain classifications.
-
-To improve structural consistency, the perception pipeline applies a sequence of morphology-based refinement operations.
-
-The objectives include:
-
-* removing isolated false detections
-* filling small discontinuities
-* smoothing road boundaries
-* improving topological consistency
-
-Morphological processing significantly improves planner stability by reducing fragmented traversable regions.
-
----
-
-# Connected Component Analysis
-
-Road segmentation occasionally produces multiple disconnected traversable regions.
-
-Some correspond to the actual road network, while others arise from false positives or isolated image artifacts.
-
-Connected component analysis identifies coherent traversable structures and suppresses isolated regions unlikely to contribute to successful navigation.
-
-This filtering stage reduces planning ambiguity and improves graph quality.
-
----
-
-# Occlusion Recovery
-
-Real-world roads are frequently interrupted by temporary visual occlusions caused by vehicles, trees, pedestrians, or shadows.
-
-If these discontinuities are passed directly to the planner, navigation graphs become fragmented, leading to unnecessary path failures.
-
-The perception pipeline therefore incorporates an occlusion recovery stage that reconstructs interrupted road connectivity using structural reasoning over neighboring traversable regions.
-
-This improves:
-
-* graph continuity
-* planner robustness
-* navigation smoothness
-* mission completion reliability
-
-Importantly, occlusion recovery operates independently of the neural network, allowing improvements in navigation quality without retraining the segmentation model.
-
----
-
-# Traversability Costmap Generation
-
-The refined semantic representation is converted into a planner-oriented traversability map.
-
-Rather than treating every road pixel equally, the costmap encodes spatial relationships that influence downstream planning behavior.
-
-This abstraction enables the planner to reason about:
-
-* traversable regions
-* safe navigation corridors
-* obstacle proximity
-* connectivity
-
-The resulting representation bridges the gap between computer vision and robotic navigation.
-
----
-
-# Robustness Considerations
-
-Design decisions throughout the perception pipeline emphasize reliability under challenging operating conditions.
-
-Examples include:
-
-* varying illumination
-* changing weather
-* shadows
-* texture variation
-* partial occlusions
-* sensor noise
-* image compression artifacts
-
-By combining deep semantic understanding with geometric post-processing, the perception subsystem maintains consistent navigation performance across diverse environments.
-
----
-
-# Computational Pipeline
-
-From a systems perspective, the perception subsystem performs a progressive abstraction of visual information:
-
-```text
-Raw RGB Image
-      │
-      ▼
-Normalized Input Tensor
-      │
-      ▼
-Deep Feature Extraction
-      │
-      ▼
-Semantic Probability Map
-      │
-      ▼
-Road Mask Refinement
-      │
-      ▼
-Topology Enhancement
-      │
-      ▼
-Traversability Representation
-      │
-      ▼
-Navigation Costmap
-```
-
-Each stage reduces uncertainty while increasing the usefulness of the representation for downstream planning.
-
----
-
-# Interface with the Planning System
-
-The perception subsystem does not generate flight trajectories directly.
-
-Instead, it exports a refined traversability representation that serves as the input to the navigation planner.
-
-This strict separation of responsibilities offers several advantages:
-
-* modular development
-* independent testing
-* interchangeable planners
-* simpler debugging
-* improved software maintainability
-
-Future planning algorithms can therefore be integrated without requiring changes to the perception architecture.
-
----
-
-# Summary
-
-The Semantic Drone perception pipeline extends beyond conventional semantic segmentation by combining deep visual understanding with topology-aware post-processing and embedded deployment optimization. Through texture-enhanced feature extraction, structural refinement, occlusion recovery, and navigation-oriented costmap generation, the subsystem transforms monocular RGB imagery into a robust representation suitable for autonomous aerial navigation.
-
-Rather than treating perception as an isolated computer vision task, the design views it as the first stage of a complete autonomy stack, ensuring that every output contributes directly to reliable planning and flight execution.
+HSV remains the reliable fallback and the segmenter used for most simulation work. The MobileNetV2 + Gabor network is the production path; its validation metrics are solid and the remaining work is domain adaptation and acceleration, not architectural redesign.

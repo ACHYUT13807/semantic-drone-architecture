@@ -1,418 +1,176 @@
-# System Architecture
+# System Architecture and Data Flow
 
-## Overview
+## 1. Purpose and Scope
 
-The Semantic Drone framework is designed as a modular, perception-driven autonomous navigation system built upon ROS 2. The architecture separates perception, planning, and control into independent computational layers, enabling each subsystem to evolve without introducing tight coupling across the navigation stack.
+This document describes the architecture of the Autonomous Semantic Drone Road-Following System as it stands at Prototype 1-α. It covers the high-level purpose of the system, the end-to-end perception–planning–control loop, the physical and logical placement of every major component, the coordinate-frame conventions that must be respected, and the design rationale behind the two-computer split that is the architectural centrepiece of the project.
 
-Unlike conventional waypoint-following UAV systems, Semantic Drone continuously reasons about the environment from onboard monocular imagery. Rather than following pre-programmed GPS coordinates, the vehicle constructs a semantic understanding of the scene, extracts traversable road structures, generates a navigation graph, computes an optimal route, and executes that route through the PX4 Offboard control interface.
+The goal is not merely to list boxes and arrows. It is to give a reader who has never seen the aircraft a precise mental model of how photons arriving at the RealSense D455 become motor commands leaving the Pixhawk, what can go wrong at each interface, and why the particular decomposition into nodes, topics, and computers was chosen.
 
-The design philosophy emphasizes:
+## 2. What the System Does
 
-* Modular software engineering
-* Real-time operation
-* Hardware abstraction
-* Simulation-to-real transfer
-* Fault isolation
-* Extensibility for future research
+The aircraft looks straight down at a road from the air, decides in real time where the drivable surface continues, and flies itself along that surface without any pre-loaded map or GPS waypoint list. The only source of “where should I go next” is the continuous video stream from a nadir-facing camera.
 
----
+Operationally the system must:
 
-# High-Level Architecture
+- Capture a continuous video stream from a downward-facing camera.
+- For each frame produce a binary mask that labels every pixel as road or not-road.
+- Convert that mask into an occupancy grid the planner can reason over (free = road, occupied = everything else).
+- Automatically select a goal somewhere along the visible road in the direction of travel.
+- Run a path-planning search (A*) over the grid to obtain a sequence of free-space cells.
+- Convert those cells into waypoints expressed in a world frame the flight controller understands.
+- Feed the waypoints to the flight controller so that the motors are driven to follow them while respecting altitude bounds, geofence, and kill-switch constraints.
+- Repeat the entire loop many times per second so that as the drone moves and the view changes the plan is continuously refreshed.
 
-```text
-                   RGB Camera
-                        │
-                        ▼
-               Image Acquisition
-                        │
-                        ▼
-             Semantic Perception Layer
-                        │
-                        ▼
-            Traversability Generation
-                        │
-                        ▼
-             Navigation Planning Layer
-                        │
-                        ▼
-            Trajectory Generation Layer
-                        │
-                        ▼
-            Flight Control Interface
-                        │
-                        ▼
-              PX4 Flight Controller
-                        │
-                        ▼
-                   Autonomous Flight
-```
+This is a closed perception-to-actuation loop. Nothing about the road geometry is known in advance.
 
-Each layer performs a single responsibility and communicates through ROS 2 topics, allowing modules to be independently tested, replaced, or upgraded.
+## 3. Why “Semantic”
 
----
+A large fraction of existing road-following drones cheat in one of three ways:
 
-# Architectural Principles
+1. They replay a pre-recorded GPS track and therefore never need to see the road at all.
+2. They follow a coloured line or artificial marker that was laid specifically for them.
+3. They are flown by a remote pilot who performs the perception with human eyes.
 
-## Modular Design
+Semantic means the drone constructs a per-pixel understanding of the scene. Every pixel is assigned a class label (“road” versus “not-road”). The resulting free-space map is general: it can in principle follow an unmarked rural road the vehicle has never seen, under changing illumination, around curves, because the system recognises *road-ness* rather than a specific track, colour blob, or GPS breadcrumb.
 
-Every major capability is encapsulated as an independent ROS 2 node.
+The practical consequence is that the perception problem becomes a semantic-segmentation problem, the planning problem becomes a search over a dynamic occupancy grid derived from that segmentation, and the control problem becomes the translation of the resulting waypoints into safe, smooth motor commands.
 
-Rather than building a monolithic navigation application, the framework decomposes the problem into specialized modules responsible for:
+## 4. The Two-Computer Split
 
-* image acquisition
-* semantic understanding
-* environment representation
-* graph generation
-* planning
-* trajectory generation
-* vehicle control
+A single architectural fact shapes the entire system: the work is divided across two computers that talk to each other over a serial/USB MAVLink link.
 
-This modular decomposition provides several advantages:
+- The **companion computer** is an NVIDIA Jetson Orin Nano 8 GB. It runs the camera driver, the segmentation network (or HSV fallback), the occupancy-grid construction, the A* planner, the automatic goal selection, the waypoint management, and the high-level control logic that issues MAVSDK setpoints. All of the ROS 2 code and all of the machine-learning inference live here. The presence of a CUDA-capable GPU is the reason the vision workload resides on this board.
 
-* simplified debugging
-* isolated failure recovery
-* reusable components
-* independent optimization
-* scalable development
+- The **flight controller** is a Pixhawk 6C Mini running PX4 1.17.0. It performs the fast, safety-critical, low-level work: reading the IMU hundreds of times per second, running the attitude and position control loops, driving the ESCs, handling arming and failsafes, and enforcing geofences. It is a hard real-time embedded system; it is emphatically not the place where a neural network runs.
 
----
+The companion says “go to this position” or “take off to this altitude.” The flight controller decides the exact motor commands that realise the request and refuses anything it judges unsafe. Keeping the split clean — smart-but-slow on the Jetson, dumb-but-fast-and-safe on the Pixhawk — is the single most important design principle of the project. Most of the integration debugging that occurred during bring-up can be traced to the hand-off across this boundary.
 
-## Layered Processing Pipeline
+Nothing flight-critical depends on the perception stack. If the network fails, the camera disconnects, or the planner stalls, the pilot and the PX4 failsafe logic remain fully capable of recovering the aircraft.
 
-The navigation stack is intentionally organized as a sequence of abstraction layers.
+## 5. The Three Planes
 
-Each stage consumes a higher-level representation generated by the previous stage.
+A clean way to hold the whole system in one’s head is to separate three logical planes:
 
-For example:
+**Perception plane.** Turns pixels into a notion of free space. Nodes: camera (or RealSense driver), segmentation, and (in simulation) the Gazebo camera bridge. Output: a binary mask or occupancy grid.
 
-```
-Pixels
+**Decision plane.** Turns free space into intent. Node: planner. It selects an automatic goal and computes a path. Output: a sequence of waypoints.
 
-↓
+**Actuation plane.** Turns intent into physical motion. Node: control (on the Jetson) together with the entire PX4 stack (on the Pixhawk). Output: motor commands and a continuous telemetry stream that flows back upward.
 
-Semantic Classes
+Data flows perception → decision → actuation. A thin feedback wire (the vehicle’s pose, republished by the control node on `/mavsdk/pose`) runs from actuation back to decision so that the planner always knows where the aircraft currently is. This is a textbook sense–plan–act architecture, the dominant paradigm for this class of autonomous robot.
 
-↓
+## 6. End-to-End Pipeline as a Conveyor Belt
 
-Traversable Regions
+Think of the system as a continuously running conveyor belt. One trip along the belt looks like this:
 
-↓
+1. **Capture.** The downward camera produces a frame — a grid of pixels, each carrying a colour value.
+2. **Segment.** The frame is passed to a segmentation stage that emits a mask of identical spatial dimensions in which every pixel is marked road (1) or not-road (0).
+3. **Project to a grid.** The mask is turned into an occupancy grid: a two-dimensional array the planner treats as a local map, with road cells free and all other cells occupied.
+4. **Choose a goal.** Because there is no external destination, the system automatically selects a point far along the visible road in the direction of travel (`find_auto_goal` logic, later refined into a centreline skeleton chain).
+5. **Plan.** A* searches the grid from the drone’s current position to that goal and returns the shortest free-space path.
+6. **Emit waypoints.** The path is converted into a short sequence of waypoints expressed in a world frame.
+7. **Follow.** The control stage feeds the waypoints to PX4 via MAVSDK; PX4 flies them.
+8. **Repeat.** As the aircraft moves, the camera sees a new stretch of road and the whole belt runs again — continuous replanning.
 
-Navigation Graph
+Every stage is realised as an independent ROS 2 node. The “conveyor belt” is the ROS 2 message bus: nodes publish their outputs on topics and subscribe to the inputs they need. The stages therefore run concurrently rather than in strict sequence.
 
-↓
+### Data Types That Flow Between Stages
 
-Flight Trajectory
+| Stage          | Input                  | Output                     | Typical ROS message type                  |
+|----------------|------------------------|----------------------------|-------------------------------------------|
+| Camera         | raw sensor             | colour image               | `sensor_msgs/Image`                       |
+| Segmentation   | colour image           | binary mask                | `sensor_msgs/Image` (mono8)               |
+| Planner        | mask + current pose    | path / next waypoint       | `nav_msgs/Path` or point                  |
+| Control        | waypoint + telemetry   | MAVLink setpoints          | (MAVSDK offboard call)                    |
+| Pose feedback  | PX4 telemetry          | current position           | `geometry_msgs/PointStamped` on `/mavsdk/pose` |
 
-↓
+The pose-feedback arrow is what closes the loop. Earlier versions of the planner consumed simulation odometry (`/odom`). Switching it to consume `/mavsdk/pose` was a deliberate design change that erased a sim-only dependency and allowed the identical planner code to run on real hardware.
 
-Vehicle Commands
-```
-
-Each transformation reduces the complexity of downstream decision making.
-
----
-
-# Software Components
-
-## Image Acquisition Layer
-
-The first stage of the pipeline acquires synchronized RGB imagery from the onboard camera.
-
-Responsibilities include:
-
-* camera initialization
-* frame synchronization
-* timestamp generation
-* ROS image publication
-
-The acquisition layer remains independent of perception, allowing different camera hardware to be integrated without modifying downstream modules.
-
----
-
-## Semantic Perception Layer
-
-The perception subsystem transforms raw imagery into a semantic understanding of the environment.
-
-Rather than detecting individual obstacles, the network estimates the semantic class of every image region, allowing the navigation system to reason about traversable road surfaces.
-
-The perception layer performs:
-
-* image preprocessing
-* semantic segmentation
-* road extraction
-* confidence estimation
-* semantic filtering
-
-The resulting semantic representation forms the foundation for all subsequent planning decisions.
-
----
-
-## Map Refinement Layer
-
-Raw segmentation outputs often contain discontinuities caused by:
-
-* shadows
-* vehicles
-* pedestrians
-* vegetation
-* lighting variation
-* sensor noise
-
-To improve navigability, the framework constructs a refined traversability representation through several post-processing stages.
-
-These include:
-
-* morphological refinement
-* connected-component analysis
-* removal of isolated regions
-* road continuity enhancement
-* traversability validation
-
-This stage produces a clean binary representation suitable for graph construction.
-
----
-
-## Occlusion Recovery
-
-Road networks frequently become fragmented due to temporary visual occlusions.
-
-Rather than treating these discontinuities as permanent obstacles, the system performs structural recovery using geometric reasoning over the segmented road topology.
-
-This enables:
-
-* reconstruction of interrupted road segments
-* preservation of road connectivity
-* reduction of planning failures
-* smoother navigation trajectories
-
-Occlusion recovery significantly improves planner robustness without modifying the perception model itself.
-
----
-
-## Costmap Generation
-
-The refined semantic map is transformed into a traversability cost representation.
-
-Rather than representing the environment as merely free or occupied, the costmap encodes navigation preferences.
-
-The planner therefore reasons about:
-
-* traversable regions
-* inflated obstacle boundaries
-* safe navigation margins
-* road connectivity
-
-This abstraction separates perception from planning while improving navigation safety.
-
----
-
-# Navigation Planning Layer
-
-The planning subsystem converts the traversable representation into an explicit graph suitable for path search.
-
-Rather than planning directly on image pixels, the planner first extracts the structural topology of the road network.
-
-Planning consists of several conceptual stages:
+## 7. Physical Placement of Components
 
 ```
-Costmap
-
-↓
-
-Skeleton Extraction
-
-↓
-
-Graph Generation
-
-↓
-
-Start Recovery
-
-↓
-
-Goal Validation
-
-↓
-
-Shortest Path Planning
-
-↓
-
-Waypoint Generation
+┌───────────────────────────── Jetson Orin Nano 8GB ─────────────────────────────┐
+│                                                                                 │
+│   camera / RealSense ──/image──▶ segmentation_node ──/mask──▶ planner_node      │
+│      ▲                                                     │                     │
+│      │                                                     │ (/path, waypoints)  │
+│      │                                                     ▼                     │
+│                                              control_node ── MAVSDK ──┐          │
+│                                                     ▲                  │          │
+│                                                     └──/mavsdk/pose────┘          │
+│                                              (telemetry republished)              │
+└───────────────────────────────────────────────────────────────┬─────────────────┘
+                                                                 │ MAVLink (serial/USB)
+                                                                 ▼
+                                           ┌────────── Pixhawk 6C Mini (PX4) ──────────┐
+                                           │  IMU • EKF2 • position/attitude control    │
+                                           │  arming • failsafes • ESC/motor outputs    │
+                                           └────────────────────────────────────────────┘
+                                                                 │ PWM / DShot
+                                                                 ▼
+                                                        ESCs ▶ Motors ▶ Props
 ```
 
-Each stage progressively transforms the environment into a representation optimized for robotic navigation.
+Everything above the MAVLink line is ROS 2 + Python + machine learning running on Linux. Everything below it is hard real-time embedded firmware.
 
----
+## 8. Coordinate Frames
 
-## Skeleton Graph Representation
+A subtle but constant source of bugs is the set of coordinate frames that must be kept consistent:
 
-The centerline of the traversable road network forms the basis of navigation.
+- **Image frame.** Pixel coordinates (u, v), origin at the top-left, u increasing right, v increasing down. The segmentation mask lives here.
+- **Grid frame.** The occupancy-grid indices (row, col) that the planner searches. Usually a direct re-indexing of the image, but the mapping must be known exactly.
+- **Body frame.** Attached to the aircraft: x forward, y right, z down (aerospace FRD convention used by PX4).
+- **World / local frame.** A fixed frame in which the aircraft moves. PX4 and MAVSDK commonly expose position in NED (North-East-Down) or a local ENU/NED variant depending on the interface.
 
-Skeletonization reduces wide road regions into a compact graph while preserving connectivity.
+Whenever the planner produces a path in image/grid coordinates and the control node must turn it into a position setpoint, a transform chain grid → body → world is required. A single sign error sends the aircraft in the opposite direction. Many of the tuning parameters that appear later exist partly to provide robustness against small frame or latency errors. The standing rule is: always know which frame a coordinate lives in before performing arithmetic on it.
 
-Benefits include:
+## 9. Why the Chosen Stack
 
-* reduced computational complexity
-* improved path smoothness
-* topology preservation
-* efficient graph search
+**ROS 2 Humble** supplies node isolation, a typed message bus, Quality-of-Service controls, and a mature ecosystem of drivers (including the RealSense driver). Humble is the LTS that matches the Ubuntu 22.04 userland shipped by JetPack 6.
 
-The planner therefore operates on graph vertices rather than dense occupancy grids.
+**PX4** is a mature, open, real-time flight stack with first-class offboard control and a clean MAVSDK API. It owns the parts that must never be wrong — attitude stabilisation, arming logic, failsafes — so the project can concentrate on perception and planning.
 
----
+**MAVSDK-Python** wraps the MAVLink protocol in a clean asynchronous Python API. The trade-off is that its asyncio event loop must be reconciled with ROS 2’s executor; that reconciliation is one of the central software problems of the project and is treated in detail in the ROS 2 document.
 
-## Reachability Analysis
+**HSV first, learned segmentation later.** Colour thresholding is cheap, deterministic, needs no GPU, and is trivially debuggable. It allowed the rest of the pipeline (planning, control, hardware) to be proven before the network was ready. The MobileNetV2 U-Net is the principled long-term segmenter, but it carries a domain gap and requires TensorRT for acceptable latency. The pragmatic ordering “make it work simply, then make it smart” is a recurring theme.
 
-Navigation goals are validated before planning.
+**Jetson Orin Nano.** It supplies a CUDA GPU in a form factor and power budget that can fly, while still running full Ubuntu and ROS 2. The 8 GB memory ceiling directly constrains model size and therefore the quantisation and architecture choices made for the segmentation network.
 
-If a requested destination lies outside the reachable traversable component, the planner automatically projects the target onto the nearest valid region.
+**RealSense D455.** It delivers both RGB and depth from a single USB device with a well-supported ROS 2 driver. Even though the current pipeline segments on colour only, the depth stream remains available for future obstacle awareness and altitude sanity checks.
 
-Similarly, invalid vehicle starting positions are recovered by identifying the closest traversable node within the navigation graph.
+## 10. Dependency Stack (Bottom-Up)
 
-These recovery mechanisms prevent unnecessary planning failures.
+Reading from the bottom:
 
----
-
-## Dynamic Replanning
-
-Autonomous flight requires continuous adaptation.
-
-Rather than generating a single static route, the planner is capable of recomputing trajectories whenever environmental conditions change.
-
-Potential replanning triggers include:
-
-* updated semantic observations
-* changing road topology
-* invalidated paths
-* newly detected obstacles
-
-This architecture enables responsive navigation while maintaining separation between perception and planning.
-
----
-
-# Trajectory Generation
-
-Graph paths are transformed into executable flight trajectories.
-
-Responsibilities include:
-
-* waypoint extraction
-* waypoint ordering
-* path continuity
-* trajectory publication
-
-The trajectory layer deliberately abstracts graph planning from vehicle control.
-
-Consequently, future planning algorithms can reuse the same trajectory interface without modification.
-
----
-
-# Flight Control Layer
-
-The final software layer interfaces with PX4 through MAVSDK.
-
-Responsibilities include:
-
-* waypoint execution
-* mission supervision
-* Offboard state management
-* telemetry monitoring
-* trajectory tracking
-* mission completion
-
-Control decisions remain independent of semantic perception, ensuring clean subsystem boundaries.
-
----
-
-# ROS 2 Communication Model
-
-The framework follows a publisher–subscriber architecture.
-
-Each subsystem exchanges information through ROS 2 topics rather than direct function calls.
-
-This approach provides:
-
-* loose coupling
-* asynchronous execution
-* distributed computation
-* simplified debugging
-* modular scalability
-
-Individual nodes may therefore execute on different processors while preserving identical interfaces.
-
----
-
-# Hardware Abstraction
-
-The software architecture intentionally separates hardware-specific functionality from algorithmic components.
-
-This allows deployment across multiple platforms with minimal modification.
-
-Supported execution environments include:
-
-* PX4 Software-In-The-Loop (SITL)
-* Gazebo simulation
-* NVIDIA Jetson companion computers
-* Pixhawk flight controllers
-
-Because perception, planning, and control remain hardware-independent, identical software modules can be reused throughout the development lifecycle.
-
----
-
-# Simulation-to-Real Workflow
-
-Development follows a progressive validation strategy.
-
-```text
-Algorithm Development
-
-↓
-
-ROS 2 Integration
-
-↓
-
-Gazebo Simulation
-
-↓
-
-PX4 SITL Validation
-
-↓
-
-Embedded Deployment
-
-↓
-
-Bench Testing
-
-↓
-
-Autonomous Flight Validation
+```
+Autonomous road-following behaviour          ← the goal
+─────────────────────────────────────────────
+A* planner + auto-goal + continuous replanning ← decision logic
+─────────────────────────────────────────────
+HSV / MobileNetV2-U-Net segmentation         ← perception
+─────────────────────────────────────────────
+ROS 2 Humble nodes, topics, QoS              ← middleware glue
+─────────────────────────────────────────────
+MAVSDK-Python ↔ MAVLink ↔ PX4 1.17.0         ← flight interface + stack
+─────────────────────────────────────────────
+Jetson Orin Nano (Ubuntu/JetPack) | Pixhawk 6C ← hardware
 ```
 
-Each stage verifies system functionality before advancing to real-world experiments, reducing deployment risk while improving software reliability.
+A failure at any layer breaks everything above it. Bring-up therefore proceeds bottom-up: solidify the hardware and PX4, then the MAVSDK link, then ROS, then perception, then planning, then behaviour. The project has climbed most of this stack in simulation and has re-climbed the lower layers on real hardware; the remaining items are physical and validation steps rather than open architectural questions.
 
----
+## 11. Status at Prototype 1-α
 
-# Design Rationale
+Every major subsystem exists in a working form on the target hardware, with a verified path from camera photons to motor outputs. The first outdoor autonomous Offboard flight under real GPS lock has been flown. The residual task list is short and concrete: ESC mapping and spin-direction verification, a true USB 3.x port for the RealSense, a minor CAD revision of the mount plate, domain fine-tuning of the network on real D455 frames after the 180° camera-rotation correction, and a confirmatory centreline-tracking flight. None of these items reopen the architecture.
 
-Several architectural decisions guided the development of Semantic Drone:
+## 12. Related Documents
 
-* Semantic perception instead of handcrafted vision algorithms.
-* Modular ROS 2 nodes rather than a monolithic application.
-* Graph-based navigation rather than pixel-level path search.
-* Hardware abstraction to simplify deployment.
-* Continuous replanning to improve robustness.
-* Layered software organization to maximize maintainability.
-
-These decisions collectively produce a navigation framework that is extensible, computationally efficient, and suitable for both research and real-world deployment.
-
----
-
-# Summary
-
-The Semantic Drone architecture transforms raw visual observations into autonomous flight through a sequence of increasingly abstract representations. By decoupling perception, environment modeling, planning, and control, the framework provides a robust foundation for future research in semantic aerial navigation while remaining portable across simulation and embedded robotic platforms.
+- `ros2.md` — detailed treatment of the middleware, nodes, QoS, and the asyncio integration problem.
+- `hardware.md` — physical components, power architecture, serial link, and mechanical design.
+- `perception.md` — camera pipeline, HSV thresholds, the segmentation rewrite, and TensorRT.
+- `planning.md` — occupancy grids, A*, automatic goal selection, and the centreline-guided planner v7.
+- `control.md` — control node, Pure Pursuit, takeoff sequence, and pose feedback.
+- `safety.md` — pilot gate and layered safety model.
+- `performance.md` — rate measurements, distributed SITL diagnosis, and Jetson inference latency.
+- `troubleshooting.md` — complete log of bugs found and fixed.
+- `deployment.md` — reproducible provisioning of a fresh Jetson.
+- `roadmap.md` — remaining tasks expressed as a dependency graph.
