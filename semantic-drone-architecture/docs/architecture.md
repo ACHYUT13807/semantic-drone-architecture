@@ -158,9 +158,9 @@ Jetson Orin Nano (Ubuntu/JetPack) | Pixhawk 6C ← hardware
 
 A failure at any layer breaks everything above it. Bring-up therefore proceeds bottom-up: solidify the hardware and PX4, then the MAVSDK link, then ROS, then perception, then planning, then behaviour. The project has climbed most of this stack in simulation and has re-climbed the lower layers on real hardware; the remaining items are physical and validation steps rather than open architectural questions.
 
-## 11. Status at Prototype 1-α
+## 11. Status at the Close of Prototype 1-α
 
-Every major subsystem exists in a working form on the target hardware, with a verified path from camera photons to motor outputs. The first outdoor autonomous Offboard flight under real GPS lock has been flown. The residual task list is short and concrete: ESC mapping and spin-direction verification, a true USB 3.x port for the RealSense, a minor CAD revision of the mount plate, domain fine-tuning of the network on real D455 frames after the 180° camera-rotation correction, and a confirmatory centreline-tracking flight. None of these items reopen the architecture.
+Every major subsystem exists in a working form on the target hardware, with a verified path from camera photons to motor outputs. TensorRT FP16 conversion of the MobileNetV2 + Gabor network is complete (31.2 ms end-to-end, ~32 FPS, 12-class head). The first outdoor autonomous Offboard flight under real GPS lock was flown on 16 July 2026 (26 s of accepted setpoints). An oscillation was diagnosed as a 180° camera-roll mounting error and corrected in software. Residual items are domain fine-tuning on real D455 frames, a confirmatory centreline-tracking flight after the patches, USB 3.x for the RealSense, a minor mount-plate CAD revision, and the occlusion-recovery research track. None of these items reopen the architecture.
 
 ## 12. Related Documents
 

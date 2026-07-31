@@ -37,3 +37,8 @@ The control node never bypasses PX4’s own pre-arm checks or failsafes. The pil
 ## Status
 
 The control node flew the first outdoor autonomous mission on 16 July 2026. The residual work is confirmation that the Pure-Pursuit and camera-rotation patches produce a stable centreline track on the subsequent flight.
+
+
+## 20 Hz Setpoint Streamer (v8)
+
+A dedicated asyncio task runs at 20 Hz and is the sole sender of MAVLink setpoints after handoff. The main control loop writes a shared (command, timestamp) slot; the streamer reads it. If the command is older than 0.5 s the streamer falls back to zeros, so a crash in the decision loop produces a hover intent rather than a lost stream. The streamer is primed from MAVSDK connection, eliminating the “Rejecting Offboard, no setpoints” failure mode observed on the first flight attempt.

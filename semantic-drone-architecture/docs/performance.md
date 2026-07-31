@@ -2,29 +2,40 @@
 
 ## Overview
 
-This document records the measured rates of the pipeline, the diagnosis of the 4.5 Hz bottleneck observed in distributed simulation, the reasons HITL is not viable on the current virtual-machine host, and the inference latency targets for the Jetson.
+This document records the measured rates of the pipeline, the completed TensorRT FP16 acceleration, the diagnosis of the earlier 4.5 Hz bottleneck in distributed simulation, and the current camera-limited operating point.
 
-## Nominal Rates
+## TensorRT FP16 — The 10× Step
 
-On the cobot desktop (native Ubuntu) the end-to-end pipeline comfortably exceeds 15 Hz with the HSV segmenter. With the MobileNetV2 network under TensorFlow the rate is lower but still sufficient for the current camera frame rate of 10–15 fps. Control setpoints are issued at a higher rate than perception so that the Pure-Pursuit tracker remains smooth even when a segmentation frame is delayed.
+Prior to conversion the v7 perception path ran under TensorFlow eager execution at approximately 309 ms end-to-end (~3.2 Hz). After TensorRT FP16 conversion of the MobileNetV2 + Gabor U-Net the v8 numbers are:
+
+| Stage                        | v7 (TF eager)     | v8 (TensorRT FP16)      |
+|------------------------------|-------------------|-------------------------|
+| Segmentation inference       | ≈ 266 ms          | **6.86 ms**             |
+| Gabor preprocessing (CPU)    | ≈ 8 ms            | 19.6 ms (now dominant)  |
+| Cost-map + skeleton + goal   | ≈ 35 ms           | ≈ 4 ms                  |
+| **End-to-end**               | ~309 ms (3.2 Hz)  | **31.2 ms (≈32 FPS)**   |
+
+Inference improved by nearly two orders of magnitude. The bottleneck moved from the GPU network to the CPU-side eight-kernel Gabor bank. At 32 FPS the perception loop is faster than the RealSense colour stream (30 fps) and is therefore camera-limited rather than compute-limited.
+
+This acceleration was a prerequisite for the first outdoor autonomous flight. At 3.2 Hz the 300 ms pipeline latency corresponded to roughly 37 cm of position uncertainty at 1.5 m/s; at 32 FPS perception latency is comparable to a pilot’s reaction time and ceases to be the limiting factor.
+
+## Nominal Operating Point
+
+- Perception loop: ~32 FPS (camera-limited).
+- Control setpoint streamer: 20 Hz (dedicated asyncio task, independent of perception).
+- Pure-Pursuit and waypoint advance run on the perception cadence or faster.
+- The 20 Hz streamer continues to emit the last valid (or zero) command even if the perception or planning node stalls, preventing PX4 Offboard timeouts.
 
 ## Distributed SITL Topology
 
-For hardware-in-the-loop style testing the Gazebo world and PX4 SITL run on a separate simulation host while the real ROS 2 pipeline runs on the Jetson. The two machines are joined by:
+For algorithm development the Gazebo world and PX4 SITL run on a separate simulation host while the real ROS 2 pipeline runs on the Jetson. The two machines are joined by ROS 2 DDS discovery (`ROS_DOMAIN_ID` shared, `ROS_LOCALHOST_ONLY=0`) and MAVLink over UDP.
 
-- ROS 2 DDS discovery (ROS_DOMAIN_ID shared, ROS_LOCALHOST_ONLY=0),
-- MAVLink over UDP (udpin://:14540).
+An early 4.5 Hz collapse in this configuration was isolated past the bridge, network, USB and protobuf layers to Gazebo’s software rendering on the VM (~20 % real time). Once the simulation host received adequate GPU resources the pipeline recovered.
 
-Cross-machine discovery was verified: nodes started on the VM appear in `ros2 node list` on the Jetson and vice versa.
+## HITL and Timing
 
-## The 4.5 Hz Bottleneck
+Hardware-in-the-loop that places the real Pixhawk in the loop with a simulated world requires low-latency deterministic timing that the present virtual-machine environment cannot guarantee. The project therefore uses pure SITL for algorithm work and moves directly to the real aircraft for final validation.
 
-When the full pipeline was first run in the distributed configuration the observed rate collapsed to approximately 4.5 Hz. Systematic isolation showed that the bottleneck was not the ROS bridge, not the network, not the USB camera, and not the protobuf version. The root cause was Gazebo’s software rendering on the VM, which delivered camera frames at only ~20 % of real time. Once the simulation host was given adequate GPU resources (or the camera rate was artificially limited) the pipeline recovered.
+## Remaining Headroom
 
-## Why HITL Is Not Viable on the Current VM
-
-Hardware-in-the-loop that places the real Pixhawk in the loop with a simulated world requires low-latency, deterministic timing that the present virtual-machine environment cannot guarantee. The project therefore uses pure SITL for algorithm development and moves directly to the real aircraft for final validation, accepting that some sim-to-real gaps remain.
-
-## Jetson Inference Targets
-
-The production path is TensorRT conversion of the MobileNetV2 U-Net. Until that conversion is complete the network runs under TensorFlow. Measured latency leaves adequate margin for a 10 Hz camera but little headroom for higher rates or additional perception features. TensorRT is therefore on the critical path for any future increase in frame rate or the addition of depth-based obstacle awareness.
+Further inference speed-ups (e.g. INT8) have limited effect until Gabor preprocessing is also accelerated or moved to the GPU. Domain fine-tuning of the network on real D455 frames remains the open correctness task; it does not affect the measured rates above.
